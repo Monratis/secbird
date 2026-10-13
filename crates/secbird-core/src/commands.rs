@@ -20,6 +20,11 @@ pub const FIRMWARE_SIZE: u8 = 0x02;
 pub const SERIAL: Command = Command::new(0x00, 0x02);
 pub const SERIAL_SIZE: u8 = 0x16;
 
+/// Receiver's wireless devices: `[count, status, pid_hi, pid_lo, ...]`.
+/// GET 00:BF verified with a HyperPolling dongle and DeathAdder V3 Pro.
+pub const WIRELESS_DEVICES: Command = Command::new(0x00, 0x3F);
+pub const WIRELESS_DEVICES_SIZE: u8 = 0x50;
+
 /// Device mode: `[mode, param]`; 0x00 = normal, 0x03 = driver mode.
 pub const DEVICE_MODE: Command = Command::new(0x00, 0x04);
 pub const DEVICE_MODE_SIZE: u8 = 0x02;

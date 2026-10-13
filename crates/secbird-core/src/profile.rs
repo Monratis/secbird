@@ -24,6 +24,8 @@ pub struct Zone {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub audio: crate::headset::Settings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dpi: Option<(u16, u16)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,6 +59,9 @@ pub fn normalize_app(name: &str) -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceProfiles {
+    /// Device-wide opt-out, unaffected by switching foreground profiles.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub windows_lighting: bool,
     pub active: String,
     pub profiles: BTreeMap<String, Profile>,
 }
@@ -64,6 +69,7 @@ pub struct DeviceProfiles {
 impl Default for DeviceProfiles {
     fn default() -> Self {
         Self {
+            windows_lighting: false,
             active: DEFAULT_PROFILE.into(),
             profiles: BTreeMap::from([(DEFAULT_PROFILE.into(), Profile::default())]),
         }
@@ -125,7 +131,7 @@ impl DeviceProfiles {
         let Some(profile) = self.profiles.get(name) else {
             return vec![Applied { setting: format!("profile '{name}'"), result: Err(Error::NotFound(name.into())) }];
         };
-        let mut out = profile.apply(dev);
+        let mut out = profile.apply_with_lighting(dev, !self.windows_lighting);
         let others: std::collections::BTreeSet<&String> = self
             .profiles
             .values()
@@ -199,6 +205,7 @@ impl Store {
         let mut added = 0;
         for (key, incoming) in other.devices {
             let target = self.devices.entry(key).or_insert_with(|| DeviceProfiles {
+                windows_lighting: false,
                 active: incoming.active.clone(),
                 profiles: BTreeMap::new(),
             });
@@ -256,6 +263,10 @@ pub struct Applied {
 impl Profile {
     /// Send every recorded setting to the device. Keeps going past individual failures.
     pub fn apply(&self, dev: &Device) -> Vec<Applied> {
+        self.apply_with_lighting(dev, true)
+    }
+
+    pub fn apply_with_lighting(&self, dev: &Device, lighting: bool) -> Vec<Applied> {
         let mut out = Vec::new();
         let mut push = |setting: String, result: Result<()>| out.push(Applied { setting, result });
 
@@ -265,7 +276,12 @@ impl Profile {
         if let Some((x, y)) = self.dpi {
             push(format!("dpi {x}x{y}"), dev.set_dpi(x, y).map(|_| ()));
         }
-        for (name, zone) in &self.lighting {
+        // Presets can reset EQ bands, so apply explicit bands last.
+        for (name, values) in self.audio.iter().filter(|(n, _)| n.ends_with("preset"))
+            .chain(self.audio.iter().filter(|(n, _)| !n.ends_with("preset"))) {
+            push(format!("audio {name}"), dev.audio_set(name, values));
+        }
+        for (name, zone) in self.lighting.iter().filter(|_| lighting) {
             let led = match dev.led_id(name) {
                 Ok(led) => led,
                 Err(e) => {
@@ -282,7 +298,7 @@ impl Profile {
                 push(format!("{name} color {color}"), dev.set_static_color(led, color));
             }
         }
-        if !self.keys.is_empty() {
+        if lighting && !self.keys.is_empty() {
             push(format!("per-key colors ({} keys)", self.keys.len()), dev.show_frame(&self.keys));
         }
         for (key, action) in &self.buttons {

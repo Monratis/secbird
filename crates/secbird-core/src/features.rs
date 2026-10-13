@@ -90,6 +90,11 @@ impl Device {
             Polling::High => {
                 let code = cmd::polling_hs_code(hz).ok_or_else(unsupported)?;
                 self.transact(cmd::POLLING_HS, cmd::POLLING_HS_SIZE, &[0x00, code])?;
+                // HyperPolling writes both selectors (live and stored), as Synapse and
+                // OpenRazer do; writing only 0 leaves the stored rate unchanged.
+                if self.pid == 0x00B3 {
+                    self.transact(cmd::POLLING_HS, cmd::POLLING_HS_SIZE, &[0x01, code])?;
+                }
             }
         }
         Ok(())
@@ -97,6 +102,9 @@ impl Device {
 
     /// Battery percentage, or `None` for wired-only devices.
     pub fn battery(&self) -> Result<Option<u8>> {
+        if self.pid == crate::headset::PID {
+            return self.headset_query(crate::headset::BATTERY).map(Some);
+        }
         if !self.spec.as_ref().is_some_and(|s| s.wireless) {
             return Ok(None);
         }
@@ -105,6 +113,9 @@ impl Device {
     }
 
     pub fn charging(&self) -> Result<bool> {
+        if self.pid == crate::headset::PID {
+            return self.headset_query(crate::headset::CHARGING).map(|n| n != 0);
+        }
         let r = self.get(cmd::CHARGING, cmd::POWER_SIZE, &[])?;
         Ok(r.args()[1] != 0)
     }

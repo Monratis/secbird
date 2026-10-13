@@ -83,7 +83,8 @@ pub fn build(api: &HidApi, db: &Db) -> Report {
     for info in infos {
         let pid = info.product_id();
         let spec = db.get(pid).cloned();
-        let dev = api.open_path(info.path()).ok().and_then(|hid| {
+        let audio_interface = pid != crate::headset::PID || (info.usage_page() == 0xFF14 && info.usage() == 1);
+        let dev = audio_interface.then(|| api.open_path(info.path()).ok()).flatten().and_then(|hid| {
             Device::open(Box::new(hid), pid, info.interface_number(), info.path().to_owned(), &TXID_CANDIDATES, spec)
         });
         interfaces.push(Interface {
@@ -94,7 +95,8 @@ pub fn build(api: &HidApi, db: &Db) -> Report {
             txid: dev.as_ref().map(|d| format!("{:02X}", d.txid)),
         });
         // One full probe per product, from the first interface that answers.
-        if let Some(dev) = dev {
+        if let Some(mut dev) = dev {
+            dev.identify_receiver(db);
             if !devices.iter().any(|d: &DeviceReport| d.pid == format!("{pid:04X}")) {
                 devices.push(probe(&dev, false));
             }
@@ -112,6 +114,20 @@ pub fn build(api: &HidApi, db: &Db) -> Report {
 
 /// Send every read-only probe to one device.
 pub fn probe(dev: &Device, simulated: bool) -> DeviceReport {
+    if dev.pid == crate::headset::PID {
+        let probes = [("battery", crate::headset::BATTERY), ("charging", crate::headset::CHARGING)]
+            .into_iter()
+            .map(|(name, command)| match dev.headset_query(command) {
+                Ok(value) => Probe { name, command: format!("HID64:{command:02X} GET"), status: "ok".into(), reply: format!("{value:02X}") },
+                Err(e) => Probe { name, command: format!("HID64:{command:02X} GET"), status: e.to_string(), reply: String::new() },
+            })
+            .collect();
+        return DeviceReport {
+            pid: format!("{:04X}", dev.pid), name: dev.name(), in_database: dev.spec.is_some(),
+            simulated, interface: dev.interface, txid: format!("{:02X}", dev.txid),
+            serial: String::new(), probes, leds: Vec::new(),
+        };
+    }
     let probes = PROBES
         .iter()
         .map(|&(name, command, size, args)| {
@@ -169,7 +185,8 @@ impl std::fmt::Display for Report {
             writeln!(f, "  (none)")?;
         }
         for i in &self.interfaces {
-            let answers = i.txid.as_ref().map(|t| format!("  <- answers Protocol 2.5 (txid {t})")).unwrap_or_default();
+            let protocol = if i.pid == "0577" { "HID audio" } else { "Protocol 2.5" };
+            let answers = i.txid.as_ref().map(|t| format!("  <- answers {protocol} (id {t})")).unwrap_or_default();
             writeln!(f, "  {}  interface {:<2} usage {}:{}{answers}", i.pid, i.interface, i.usage_page, i.usage)?;
         }
 

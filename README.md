@@ -37,6 +37,45 @@ with `SHA256SUMS.txt` on the release page.
 Prefer no installer? Download `Secretarybird-<version>-portable.zip` instead, unzip it anywhere
 and run `secbird-tray.exe`.
 
+### Local hardware support changes
+
+- HyperPolling receivers identify their connected mouse with a read-only device query,
+  rather than showing only the dongle name. The receiver's profile key is kept.
+- BlackShark V3 Pro (`1532:0577`) is discovered on its HID audio interface. Battery percentage
+  and charging status, ANC/ambient mode and level, six speaker EQ slots and active slot,
+  microphone EQ/presets, sidetone and auto-off are supported. Writes are read back from
+  hardware before being saved to a profile. The microphone's physical mute switch is
+  read-only. **THX spatial audio, OS volume and Synapse software voice enhancements are
+  not implemented**; this is hardware control, not a replacement for the THX audio driver.
+- HyperPolling rate changes write both live and stored selectors.
+
+The editor has a **Let Windows control this device's lighting** switch on each device.
+It appears only where Windows reports a LampArray for that device — that is, the device
+has LEDs and Windows can drive them. Turning it on hands that one device's lighting to
+Windows and stops Secretarybird writing it, including profiles and Sync; dragging the
+device in Windows **Settings → Personalization → Dynamic lighting** then chooses its
+colour and effects. The choice is stored per device and survives profile switches.
+`secbird lamps` prints the native LampArray inventory.
+
+Background (app-driven) control needs package identity and the
+`com.microsoft.windows.lighting` extension: build the registered version with
+`installer/lighting/build.ps1` after a release build. The generated MSIX is unsigned; it
+must be signed with a trusted certificate before installation. The build script does not
+change certificate trust or install anything. Then prioritize Secretarybird in Windows
+Background light control. Secretarybird never bypasses Windows by writing raw HID
+lighting to a device Windows owns, and never alters undocumented Windows registry
+priorities.
+
+Keyboards with a separate game-controller HID child have a disable/re-enable button.
+Only game-controller collections of the selected physical keyboard are targeted, never
+its keyboard/mouse/lighting interfaces or USB parent. Windows asks for administrator
+approval. A disconnected/remembered controller is shown separately; Windows may require
+it to be reconnected before disabling it.
+
+CLI examples: `secbird -d 0577 audio`, `secbird -d 0577 audio anc 1 3`,
+`secbird -d 0577 audio mic-eq -5 -4 -4 -3 -2 1 2 3 3 3`,
+`secbird -d 02A7 windows-lighting on`, `secbird -d 02A7 gamepad off`.
+
 **Updating:** run the newer installer; your settings are kept.
 **Uninstalling:** Windows Settings → Apps → Secretarybird. It asks whether to keep your profiles.
 

@@ -1,7 +1,7 @@
 //! Discovery and request/reply transport over HID feature reports.
 
 use crate::commands as cmd;
-use crate::db::{Db, DeviceSpec, RAZER_VID};
+use crate::db::{Db, DeviceSpec, Kind, RAZER_VID};
 use crate::error::{Error, Result};
 use crate::proto::{Command, Report, Status, REPORT_LEN};
 use crate::transport::Transport;
@@ -34,10 +34,41 @@ impl Device {
         }
     }
 
+    /// Keep the receiver's transport, capabilities and profile key, but label the mouse
+    /// it actually reports. Unknown/offline devices leave the receiver name unchanged.
+    pub(crate) fn identify_receiver(&mut self, db: &Db) {
+        if self.pid != 0x00B3 {
+            return;
+        }
+        let Ok(reply) = self.get(cmd::WIRELESS_DEVICES, cmd::WIRELESS_DEVICES_SIZE, &[]) else { return };
+        let Some(pid) = connected_mouse_pid(reply.args()) else { return };
+        let Some(mouse) = db.get(pid).filter(|s| s.kind == Kind::Mouse) else { return };
+        if let Some(spec) = &mut self.spec {
+            spec.name = format!("{} (via HyperPolling)", mouse.name);
+        }
+    }
+
     /// Send one command and wait for its reply. `size` is the argument length the
     /// device expects for this command.
     pub fn transact(&self, command: Command, size: u8, args: &[u8]) -> Result<Report> {
+        if self.pid == crate::headset::PID {
+            return Err(Error::Unsupported("this headset uses HID audio reports, not Protocol 2.5".into()));
+        }
         transact(self.transport.as_ref(), self.txid, command, size, args)
+    }
+
+    pub(crate) fn headset_query(&self, command: u8) -> Result<u8> {
+        if self.pid != crate::headset::PID {
+            return Err(Error::Unsupported("HID audio reports on this device".into()));
+        }
+        crate::headset::query(self.transport.as_ref(), command)
+    }
+
+    pub(crate) fn headset_transact(&self, command: u8, args: &[u8]) -> Result<Vec<u8>> {
+        if self.pid != crate::headset::PID {
+            return Err(Error::Unsupported("HID audio reports on this device".into()));
+        }
+        crate::headset::transact(self.transport.as_ref(), command, args)
     }
 
     pub fn get(&self, command: Command, size: u8, args: &[u8]) -> Result<Report> {
@@ -65,6 +96,18 @@ fn parse_serial(args: &[u8]) -> String {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         && s.chars().any(|c| c != '0' && c != 'F' && c != 'f');
     if usable { s } else { String::new() }
+}
+
+fn connected_mouse_pid(args: &[u8]) -> Option<u16> {
+    let count = *args.first()? as usize;
+    let entries = args.get(1..1 + count * 3)?;
+    let mut connected = entries.chunks_exact(3).filter_map(|entry| {
+        let pid = u16::from_be_bytes([entry[1], entry[2]]);
+        (entry[0] == 1 && pid != 0 && pid != 0xFFFF).then_some(pid)
+    });
+    let pid = connected.next()?;
+    // This receiver supports one mouse. Don't guess if a future firmware reports more.
+    connected.next().is_none().then_some(pid)
 }
 
 fn transact(hid: &dyn Transport, txid: u8, command: Command, size: u8, args: &[u8]) -> Result<Report> {
@@ -107,6 +150,7 @@ pub fn candidates(api: &HidApi) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = api
         .device_list()
         .filter(|d| d.vendor_id() == RAZER_VID)
+        .filter(|d| d.product_id() != crate::headset::PID || (d.usage_page() == 0xFF14 && d.usage() == 1))
         .map(|d| Candidate {
             pid: d.product_id(),
             interface: d.interface_number(),
@@ -118,12 +162,15 @@ pub fn candidates(api: &HidApi) -> Vec<Candidate> {
     out
 }
 
-/// Find every connected Razer device that answers Protocol 2.5, one handle per physical
+/// Find every connected Razer device that answers a supported protocol, one handle per physical
 /// device (several units of the same model are told apart by serial number).
 ///
 /// Simulated devices named in `SECBIRD_SIM` (e.g. `mouse,keyboard`) are added at the end.
 pub fn discover(api: &HidApi, db: &Db) -> Vec<Device> {
     let mut found = discover_hid(api, db);
+    for dev in &mut found {
+        dev.identify_receiver(db);
+    }
     found.extend(crate::sim::from_env());
     found
 }
@@ -178,6 +225,11 @@ impl Device {
         txids: &[u8],
         spec: Option<DeviceSpec>,
     ) -> Option<Device> {
+        if pid == crate::headset::PID {
+            let dev = Device { transport, pid, serial: String::new(), interface, path, txid: 0x60, spec };
+            dev.headset_query(crate::headset::BATTERY).ok()?;
+            return Some(dev);
+        }
         let (txid, reply) = txids.iter().copied().find_map(|t| {
             transact(transport.as_ref(), t, cmd::SERIAL.get(), cmd::SERIAL_SIZE, &[]).ok().map(|r| (t, r))
         })?;
@@ -196,7 +248,19 @@ pub fn unanswered(api: &HidApi, found: &[Device]) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_serial;
+    use super::{connected_mouse_pid, parse_serial};
+
+    #[test]
+    fn receiver_reply_requires_one_connected_device() {
+        assert_eq!(connected_mouse_pid(&[2, 1, 0, 0xB7, 0, 0xFF, 0xFF]), Some(0x00B7));
+        for args in [
+            &[][..], &[0], &[2, 1, 0, 0xB7], &[255, 1, 0, 0xB7],
+            &[1, 0, 0, 0xB7], &[1, 1, 0xFF, 0xFF], &[1, 1, 0, 0],
+            &[2, 1, 0, 0xB7, 1, 0, 0xA6],
+        ] {
+            assert_eq!(connected_mouse_pid(args), None, "{args:?}");
+        }
+    }
 
     #[test]
     fn serials_are_cleaned() {

@@ -19,6 +19,17 @@ use std::time::{Duration, SystemTime};
 
 const PAGE: &str = include_str!("editor.html");
 const LOGO_PNG: &[u8] = include_bytes!("../../../assets/logo-64.png");
+/// Product photos, keyed by the HID pid the device keeps even when it renames itself
+/// (the HyperPolling receiver answers for its paired mouse). WebP only where the
+/// vendor asset is WebP; every browser that runs this editor supports it.
+const PHOTOS: &[(u16, &str, &[u8])] = &[
+    (0x0577, "image/png", include_bytes!("../../../assets/blackshark-v3-pro.png")),
+    (0x02A7, "image/webp", include_bytes!("../../../assets/huntsman-v3-pro-tkl.webp")),
+    (0x00B3, "image/png", include_bytes!("../../../assets/deathadder-v3-pro.png")),
+    (0x00B6, "image/png", include_bytes!("../../../assets/deathadder-v3-pro.png")),
+    (0x00C2, "image/png", include_bytes!("../../../assets/deathadder-v3-pro.png")),
+    (0x00C3, "image/png", include_bytes!("../../../assets/deathadder-v3-pro.png")),
+];
 const MAX_HEADER: usize = 16 * 1024;
 const MAX_BODY: usize = 64 * 1024;
 
@@ -224,6 +235,16 @@ impl Server {
                 engine.rescan();
                 Ok(state(&engine))
             }
+            ("POST", "/api/windows-lighting") => {
+                #[cfg(windows)]
+                {
+                    let explorer = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into())).join("explorer.exe");
+                    std::process::Command::new(explorer).arg("ms-settings:personalization-lighting").spawn()
+                        .map(|_| json!({})).map_err(|e| Error::System(e.to_string()))
+                }
+                #[cfg(not(windows))]
+                { Err(Error::Unsupported("Windows only".into())) }
+            }
             ("POST", path) => post(&mut engine, path, &req.body),
             _ => return Response::text("404 Not Found", "Not found"),
         };
@@ -236,6 +257,10 @@ impl Server {
 
 #[derive(Deserialize)]
 struct Body {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    values: Vec<i16>,
     /// Device key (`PID:SERIAL`); older clients send only `pid`.
     #[serde(default)]
     id: String,
@@ -319,6 +344,24 @@ fn post(engine: &mut Engine, path: &str, body: &[u8]) -> Result<Value, Error> {
             .ok_or_else(|| Error::NotFound(format!("device {target}")))?;
         let mut store = Store::load(&config_dir().join("profiles.json"))?;
         match path {
+            "/api/lighting-owner" => {
+                actions::set_windows_lighting(dev, &mut store, b.enabled)?;
+                let failures = if b.enabled { Vec::new() } else {
+                    let saved = store.for_device(dev).active();
+                    let lighting = secbird_core::Profile { lighting: saved.lighting.clone(), keys: saved.keys.clone(), ..Default::default() };
+                    lighting.apply(dev).into_iter()
+                        .filter_map(|a| a.result.err().map(|e| e.to_string())).collect::<Vec<_>>()
+                };
+                Ok(json!({ "device": device_json(dev), "failures": failures }))
+            }
+            "/api/gamepad" => {
+                secbird_core::windows_device::set_gamepad(dev, b.enabled)?;
+                Ok(json!({ "device": device_json(dev) }))
+            }
+            "/api/audio" => {
+                actions::set_audio(dev, &mut store, &b.name, b.values.clone())?;
+                Ok(json!({ "device": device_json(dev) }))
+            }
             "/api/dpi" => {
                 let (x, y) = actions::set_dpi(dev, &mut store, b.x, b.y)?;
                 Ok(json!({ "dpi": [x, y] }))
@@ -409,11 +452,13 @@ fn state(engine: &Engine) -> Value {
 }
 
 fn device_json(dev: &Device) -> Value {
+    let (audio, audio_errors) = dev.audio_state();
     let spec = dev.spec.as_ref();
     let (profile_names, active) = Engine::profiles(dev);
     let all = Store::load(&config_dir().join("profiles.json")).ok().map(|mut s| s.for_device(dev).clone());
     let profile = all.as_ref().and_then(|p| serde_json::to_value(p.active()).ok()).unwrap_or(Value::Null);
     // Every profile's settings, so the editor can show them side by side.
+    let windows_lighting = all.as_ref().map(|p| p.windows_lighting).unwrap_or(true);
     let profiles_data = all.and_then(|p| serde_json::to_value(p.profiles).ok()).unwrap_or(Value::Null);
     let dpi_range = spec.and_then(|s| s.dpi.as_ref());
     let polling_options: &[u32] = match spec.and_then(|s| s.polling) {
@@ -431,6 +476,8 @@ fn device_json(dev: &Device) -> Value {
         None => "unknown",
     };
     json!({
+        "image": PHOTOS.iter().find(|(pid, _, _)| *pid == dev.pid)
+            .map(|(_, mime, bytes)| format!("data:{mime};base64,{}", base64(bytes))),
         "id": dev.key(),
         "pid": format!("{:04X}", dev.pid),
         "name": dev.name(),
@@ -458,12 +505,29 @@ fn device_json(dev: &Device) -> Value {
         "active": active,
         "profile": profile,
         "profilesData": profiles_data,
+        "audio": audio,
+        "audio_errors": audio_errors,
+        "windows_lighting": windows_lighting,
+        "lamp": secbird_core::lamp::for_device(dev).ok().flatten(),
+        "gamepads": secbird_core::windows_device::gamepads(dev).unwrap_or_default(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::base64;
+
+    /// Manual smoke test, separate from the user's tray instance. Never applies profiles.
+    /// cargo test -p secbird-tray editor_browser -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn editor_browser() {
+        let mut engine = crate::engine::Engine::new().unwrap();
+        engine.rescan();
+        let editor = super::start(std::sync::Arc::new(std::sync::Mutex::new(engine))).unwrap();
+        println!("EDITOR_TEST_URL={}", editor.url);
+        loop { std::thread::park(); }
+    }
 
     #[test]
     fn base64_matches_rfc4648_vectors() {

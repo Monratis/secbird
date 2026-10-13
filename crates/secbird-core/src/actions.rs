@@ -2,12 +2,38 @@
 //! profile and save. The CLI and the editor both go through here, so they behave alike.
 
 use crate::device::Device;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::features::Rgb;
 use crate::profile::{Store, Zone};
 
 fn zone<'a>(store: &'a mut Store, dev: &Device, name: &str) -> &'a mut Zone {
     store.for_device(dev).active_mut().lighting.entry(name.to_string()).or_default()
+}
+
+pub fn set_audio(dev: &Device, store: &mut Store, name: &str, values: Vec<i16>) -> Result<()> {
+    dev.audio_set(name, &values)?;
+    if name == "mic-preset" {
+        let bands = dev.audio_read("mic-eq")?;
+        store.for_device(dev).active_mut().audio.insert("mic-eq".into(), bands);
+    }
+    store.for_device(dev).active_mut().audio.insert(name.into(), values);
+    store.save()
+}
+
+fn own_lighting(dev: &Device, store: &mut Store) -> Result<()> {
+    if store.for_device(dev).windows_lighting {
+        return Err(Error::Unsupported("lighting handed to Windows for this device".into()));
+    }
+    Ok(())
+}
+
+pub fn set_windows_lighting(dev: &Device, store: &mut Store, enabled: bool) -> Result<()> {
+    if enabled {
+        let lamp = crate::lamp::for_device(dev)?.ok_or_else(|| Error::Unsupported("this device has no connected Windows LampArray with LEDs".into()))?;
+        crate::lamp::release(&lamp.id)?;
+    }
+    store.for_device(dev).windows_lighting = enabled;
+    store.save()
 }
 
 /// Returns the DPI actually set, after rounding to the device's step.
@@ -25,6 +51,7 @@ pub fn set_polling(dev: &Device, store: &mut Store, hz: u32) -> Result<()> {
 }
 
 pub fn set_color(dev: &Device, store: &mut Store, zone_name: &str, color: Rgb) -> Result<()> {
+    own_lighting(dev, store)?;
     dev.set_static_color(dev.led_id(zone_name)?, color)?;
     store.for_device(dev).active_mut().keys.clear();
     let z = zone(store, dev, zone_name);
@@ -35,6 +62,7 @@ pub fn set_color(dev: &Device, store: &mut Store, zone_name: &str, color: Rgb) -
 
 /// Brightness in percent, clamped to 0-100.
 pub fn set_brightness(dev: &Device, store: &mut Store, zone_name: &str, percent: u8) -> Result<()> {
+    own_lighting(dev, store)?;
     let percent = percent.min(100);
     dev.set_brightness(dev.led_id(zone_name)?, percent)?;
     zone(store, dev, zone_name).brightness = Some(percent);
@@ -42,6 +70,7 @@ pub fn set_brightness(dev: &Device, store: &mut Store, zone_name: &str, percent:
 }
 
 pub fn lights_off(dev: &Device, store: &mut Store, zone_name: &str) -> Result<()> {
+    own_lighting(dev, store)?;
     dev.lights_off(dev.led_id(zone_name)?)?;
     store.for_device(dev).active_mut().keys.clear();
     zone(store, dev, zone_name).off = true;
@@ -51,6 +80,7 @@ pub fn lights_off(dev: &Device, store: &mut Store, zone_name: &str) -> Result<()
 /// Per-key colors (row-major). They replace any whole-zone color or off state;
 /// brightness is kept.
 pub fn set_keys(dev: &Device, store: &mut Store, keys: Vec<Rgb>) -> Result<()> {
+    own_lighting(dev, store)?;
     dev.show_frame(&keys)?;
     let profile = store.for_device(dev).active_mut();
     for z in profile.lighting.values_mut() {
@@ -101,6 +131,7 @@ pub struct Synced {
 pub fn sync_color(devices: &[Device], store: &mut Store, color: Rgb) -> Vec<Synced> {
     let mut out = Vec::new();
     for dev in devices {
+        if store.for_device(dev).windows_lighting { continue; }
         let zones: Vec<String> = dev.spec.as_ref().map(|s| s.leds.iter().map(|l| l.name.clone()).collect()).unwrap_or_default();
         for zone in zones {
             let result = set_color(dev, store, &zone, color);

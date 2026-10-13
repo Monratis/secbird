@@ -176,10 +176,21 @@ impl Engine {
         self.unsupported = secbird_core::device::unanswered(&self.api, &self.devices)
             .into_iter()
             .map(|pid| match db.get(pid) {
-                Some(spec) if spec.lighting == secbird_core::Lighting::Kraken => {
+                Some(spec) if pid == secbird_core::headset::PID => {
+                    Unsupported { pid, name: spec.name.clone(), reason: "No HID audio response. Check headset power or close Synapse" }
+                }
+                Some(spec) if spec.kind == secbird_core::Kind::Headset => {
                     Unsupported { pid, name: spec.name.clone(), reason: "Headset protocol not supported yet" }
                 }
-                Some(spec) => Unsupported { pid, name: spec.name.clone(), reason: "Not answering. Is Synapse running?" },
+                Some(spec) => Unsupported {
+                    pid,
+                    name: spec.name.clone(),
+                    reason: if pid == 0x00B3 {
+                        "The wireless receiver isn't answering. Turn the paired mouse on (or move it), then Rescan."
+                    } else {
+                        "Not answering. Is Synapse running?"
+                    },
+                },
                 None => Unsupported { pid, name: format!("Razer device {pid:04X}"), reason: "Unknown model. Run secbird report" },
             })
             .collect();

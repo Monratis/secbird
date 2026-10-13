@@ -10,6 +10,9 @@ DEVICE:
   list                      Connected devices
   info                      Firmware, serial, DPI, polling rate, battery
   battery                   Battery level and charging state
+  audio [SETTING [VALUES...]] Read or set BlackShark hardware audio (use audio to list)
+  windows-lighting [on|off]  Let Windows control this device's lighting (device-wide)
+  gamepad [on|off]           Show/enable/disable only this keyboard's gamepad HID child
   report [--json]           Read-only description of connected Razer hardware, to share
                             when a device is missing or misbehaves (serials shortened)
 
@@ -98,6 +101,10 @@ fn run(mut args: Vec<String>) -> Result<(), Error> {
     if command == "debloat" {
         return debloat_cmd(&args[1..]);
     }
+    if command == "lamps" {
+        println!("{}", serde_json::to_string_pretty(&secbird_core::lamp::list()?).map_err(|e| Error::System(e.to_string()))?);
+        return Ok(());
+    }
     if command == "export" || command == "import" {
         let file = args.get(1).ok_or_else(|| Error::InvalidArg(format!("usage: {command} <file>")))?;
         let path = std::path::Path::new(file);
@@ -149,10 +156,17 @@ fn run(mut args: Vec<String>) -> Result<(), Error> {
         }
         for pid in secbird_core::device::unanswered(&api, &devices).into_iter().filter(|p| selects(*p, "", "")) {
             match db.get(pid) {
-                Some(spec) if spec.lighting == secbird_core::Lighting::Kraken => {
+                Some(spec) if pid == secbird_core::headset::PID => {
+                    println!("{pid:04X}  {}  (connected but no HID audio response; check headset power or close Synapse)", spec.name)
+                }
+                Some(spec) if spec.kind == secbird_core::Kind::Headset => {
                     println!("{pid:04X}  {}  (connected; its headset protocol isn't supported yet)", spec.name)
                 }
-                Some(spec) => println!("{pid:04X}  {}  (connected but not answering; is Synapse running?)", spec.name),
+                Some(spec) => println!(
+                    "{pid:04X}  {}  (connected but not answering; {})",
+                    spec.name,
+                    if pid == 0x00B3 { "turn the paired mouse on, then replug the receiver" } else { "is Synapse running?" }
+                ),
                 None => println!("{pid:04X}  Unknown Razer device  (connected, not answering; please share `secbird report`)"),
             }
         }
@@ -205,6 +219,38 @@ Note: Razer Synapse is running ({}). It can overwrite these settings;", synapse.
 
     match command.as_str() {
         "info" => info(dev, &mut store),
+        "windows-lighting" => {
+            if let Some(value) = rest.first() {
+                let enabled = match value.as_str() { "on" => true, "off" => false,
+                    _ => return Err(Error::InvalidArg("use on or off".into())) };
+                actions::set_windows_lighting(dev, &mut store, enabled)?;
+            }
+            println!("{}", if store.for_device(dev).windows_lighting { "Windows (enable Dynamic Lighting in Windows Settings)" } else { "Secretarybird" });
+            Ok(())
+        }
+        "gamepad" => {
+            if let Some(value) = rest.first() {
+                let enabled = match value.as_str() { "on" => true, "off" => false,
+                    _ => return Err(Error::InvalidArg("use on or off".into())) };
+                secbird_core::windows_device::set_gamepad(dev, enabled)?;
+            }
+            println!("{}", serde_json::to_string(&secbird_core::windows_device::gamepads(dev)?).map_err(|e| Error::System(e.to_string()))?);
+            Ok(())
+        }
+        "audio" => match rest {
+            [] => {
+                let (settings, errors) = dev.audio_state();
+                if dev.pid != secbird_core::headset::PID { return Err(Error::Unsupported("not a supported headset".into())); }
+                println!("{}", serde_json::json!({ "settings": settings, "errors": errors }));
+                Ok(())
+            }
+            [name] => { println!("{:?}", dev.audio_read(name)?); Ok(()) }
+            [name, values @ ..] => {
+                let values = values.iter().map(|v| v.parse::<i16>().map_err(|_| Error::InvalidArg(format!("invalid audio value {v}"))))
+                    .collect::<Result<Vec<_>, _>>()?;
+                actions::set_audio(dev, &mut store, name, values)
+            }
+        },
         "battery" => match dev.battery()? {
             None => {
                 println!("Wired device, no battery.");
@@ -414,6 +460,13 @@ fn report_apply(results: Vec<secbird_core::profile::Applied>) -> Result<(), Erro
 }
 
 fn info(dev: &Device, store: &mut Store) -> Result<(), Error> {
+    if dev.pid == secbird_core::headset::PID {
+        println!("Device    {} ({:04X})", dev.name(), dev.pid);
+        println!("Battery   {}%", dev.battery()?.unwrap_or(0));
+        let (settings, errors) = dev.audio_state();
+        println!("{}", serde_json::json!({ "settings": settings, "errors": errors }));
+        return Ok(());
+    }
     let (major, minor) = dev.firmware()?;
     println!("Device    {} ({:04X})", dev.name(), dev.pid);
     println!("Serial    {}", dev.serial()?);

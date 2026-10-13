@@ -51,8 +51,11 @@ pub struct SimState {
     /// `None` = the device has no DPI sensor (keyboards).
     pub dpi: Option<(u16, u16)>,
     pub polling_code: u8,
+    pub polling_hs: Option<[u8; 2]>,
     pub battery: Option<u8>,
     pub charging: bool,
+    /// Mouse reported by a HyperPolling receiver; None = command unsupported.
+    pub paired_mouse: Option<u16>,
     /// LED ids that exist on the device.
     pub leds: Vec<u8>,
     pub brightness: BTreeMap<u8, u8>,
@@ -83,8 +86,10 @@ impl SimState {
             firmware: (1, 2),
             dpi: None,
             polling_code: 0x01,
+            polling_hs: None,
             battery: None,
             charging: false,
+            paired_mouse: None,
             leds: Vec::new(),
             brightness: BTreeMap::new(),
             effects: BTreeMap::new(),
@@ -116,6 +121,13 @@ impl SimState {
         }
         let known = |s: &Self, led: u8| s.leds.contains(&led);
         match c {
+            c if c == cmd::WIRELESS_DEVICES.get() => match self.paired_mouse {
+                Some(pid) => {
+                    let [hi, lo] = pid.to_be_bytes();
+                    ok(vec![2, 1, hi, lo, 0, 0xFF, 0xFF])
+                }
+                None => (NotSupported, vec![]),
+            },
             c if c == cmd::FIRMWARE.get() => ok(vec![self.firmware.0, self.firmware.1]),
             c if c == cmd::SERIAL.get() => {
                 let mut v = self.serial.as_bytes().to_vec();
@@ -158,6 +170,14 @@ impl SimState {
                 false => ok(vec![1]),
             },
             c if c == cmd::POLLING.get() => ok(vec![self.polling_code]),
+            c if c == cmd::POLLING_HS.get() && a[0] < 2 => match self.polling_hs {
+                Some(rates) => ok(vec![a[0], rates[a[0] as usize]]),
+                None => (NotSupported, vec![]),
+            },
+            cmd::POLLING_HS if a[0] < 2 && cmd::polling_hs_hz(a[1]).is_some() => match &mut self.polling_hs {
+                Some(rates) => { rates[a[0] as usize] = a[1]; ok(a[..2].to_vec()) }
+                None => (NotSupported, vec![]),
+            },
             cmd::POLLING => {
                 if cmd::polling_hz(a[0]).is_none() {
                     return (Failed, vec![]);
@@ -532,6 +552,34 @@ mod tests {
     }
 
     #[test]
+    fn hyperpolling_identifies_mouse_without_changing_transport_or_profiles() {
+        let db = crate::Db::builtin().unwrap();
+        let sim = Sim::wireless_mouse();
+        sim.state().polling_hs = Some([0x08; 2]);
+        let mut dev = sim.open(0x00B3, db.get(0x00B3).cloned()).unwrap();
+        let key = dev.key();
+        dev.identify_receiver(&db);
+        assert_eq!(dev.name(), "HyperPolling Wireless Dongle");
+        sim.state().paired_mouse = Some(0x1234); // unknown mouse: no guessed name
+        dev.identify_receiver(&db);
+        assert_eq!(dev.name(), "HyperPolling Wireless Dongle");
+        sim.state().paired_mouse = Some(0x00B7);
+        dev.identify_receiver(&db);
+        assert_eq!(dev.name(), "DeathAdder V3 Pro (Wireless) (via HyperPolling)");
+        assert_eq!(dev.key(), key);
+        assert_eq!(dev.pid, 0x00B3);
+        assert_eq!(dev.spec.as_ref().unwrap().polling, Some(crate::db::Polling::High));
+        assert_eq!(dev.battery().unwrap(), Some(75));
+        assert!(sim.state().log.iter().all(|c| c.id & 0x80 != 0));
+        assert_eq!(dev.polling_rate().unwrap(), 1000);
+        dev.set_polling_rate(2000).unwrap();
+        assert_eq!(dev.polling_rate().unwrap(), 2000);
+        assert_eq!(sim.state().polling_hs, Some([0x04; 2]));
+        assert!(dev.set_polling_rate(333).is_err());
+        assert_eq!(sim.state().polling_hs, Some([0x04; 2]));
+    }
+
+    #[test]
     fn unknown_led_and_unsupported_commands_fail() {
         let sim = Sim::mouse();
         let dev = open(&sim, MOUSE_PID);
@@ -609,6 +657,34 @@ mod tests {
         dev.set_static_color(led, Rgb(0, 255, 0)).unwrap();
         dev.set_brightness(led, 100).unwrap();
         assert_eq!(sim.state().brightness[&5], 255);
+    }
+
+    #[test]
+    fn windows_lighting_blocks_actions_sync_and_profile_lighting_only() {
+        use crate::{actions, Store};
+        let sim = Sim::mouse();
+        let dev = open(&sim, MOUSE_PID);
+        let mut store = Store::default();
+        assert!(actions::set_windows_lighting(&dev, &mut store, true).is_err());
+        assert!(!store.for_device(&dev).windows_lighting);
+        store.for_device(&dev).windows_lighting = true;
+        sim.state().log.clear();
+        assert!(actions::set_color(&dev, &mut store, "logo", Rgb(1, 2, 3)).is_err());
+        assert!(actions::set_brightness(&dev, &mut store, "logo", 40).is_err());
+        assert!(actions::lights_off(&dev, &mut store, "logo").is_err());
+        assert!(actions::set_keys(&dev, &mut store, Vec::new()).is_err());
+        assert!(actions::sync_color(std::slice::from_ref(&dev), &mut store, Rgb(1, 2, 3)).is_empty());
+        assert!(sim.state().log.is_empty());
+        let mut p = Profile { dpi: Some((1600, 1600)), ..Default::default() };
+        p.lighting.insert("logo".into(), Zone { color: Some(Rgb(1, 2, 3)), ..Default::default() });
+        assert!(p.apply_with_lighting(&dev, false).iter().all(|r| r.result.is_ok()));
+        assert_eq!(sim.state().dpi, Some((1600, 1600)));
+        assert!(sim.state().log.iter().all(|c| *c == cmd::DPI));
+        store.for_device(&dev).create("Gaming").unwrap();
+        store.for_device(&dev).switch("Gaming").unwrap();
+        let text = serde_json::to_string(&store).unwrap();
+        let mut restored: Store = serde_json::from_str(&text).unwrap();
+        assert!(restored.for_device(&dev).windows_lighting);
     }
 
     #[test]
