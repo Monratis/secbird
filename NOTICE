@@ -1,4 +1,15 @@
-Secretarybird contains no code or assets from Razer Inc.
+Secretarybird contains no code from Razer Inc.
+
+vendor/hidapi contains hidapi-rs 2.6.7, with one Windows descriptor-read workaround.
+See vendor/hidapi/LICENSE.txt for its original license and SECBIRD-PATCH.md for details.
+
+assets/deathadder-v3-pro.png, assets/huntsman-v3-pro-tkl.webp and
+assets/blackshark-v3-pro.png are Razer product images supplied by the user, from
+https://dl.razerzone.com/src/6130/6130-1-en-v2.png,
+https://assets2.razerzone.com/images/pnx.assets/d01af9710e2077e2b88eb9dc6f68f62f/quick-actuation-adjustment-mode.webp
+and the BlackShark V3 Pro image on phoenix.razer.com (all downloaded 2026-10-13).
+Copyright belongs to Razer Inc.; these images are not covered by Secretarybird's
+MIT/Apache software licenses. Used solely to identify the corresponding product.
 
 crates/secbird-core/devices.json restates hardware facts (USB product ids, names,
 device types, DPI limits, lighting zones, key-grid sizes, lighting command set)
