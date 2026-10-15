@@ -2,8 +2,9 @@
 //! output reports out and input reports back, not feature reports. No initialization or
 //! RF wake loop is needed.
 //!
-//! Confirmed on hardware (BlackShark V3 Pro, 1532:0577): battery, charging, ANC/ambient,
-//! six speaker EQ slots, microphone EQ and presets, sidetone and auto-off. Packet facts:
+//! Confirmed on hardware (BlackShark V3 Pro, 1532:0577 wireless and 1532:0576 wired —
+//! both answer identically): battery, charging, ANC/ambient, six speaker EQ slots,
+//! microphone EQ and presets, sidetone and auto-off. Packet facts:
 //! https://github.com/openrazer/openrazer/issues/2838
 //!
 //! The plain BlackShark V3 (1532:0579 wired, 1532:057A wireless) reports the same vendor
@@ -17,10 +18,10 @@ use crate::Device;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-/// Confirmed on hardware; see [`PIDS`] for the rest.
+/// Wireless dongle; see [`PIDS`] for the rest.
 pub const PID: u16 = 0x0577;
 /// Every product that speaks this protocol.
-pub const PIDS: [u16; 3] = [0x0577, 0x0579, 0x057A];
+pub const PIDS: [u16; 4] = [0x0576, 0x0577, 0x0579, 0x057A];
 
 /// Whether this product id speaks the headset protocol rather than Protocol 2.5.
 pub fn is_headset(pid: u16) -> bool {
@@ -307,7 +308,7 @@ mod tests {
             Box::new(AudioSim(Mutex::new(Vec::new()))), PID, 5,
             std::ffi::CString::new("sim:headset").unwrap(), &[], db.get(PID).cloned(),
         ).expect("audio GET answers even though feature reports are unsupported");
-        assert_eq!(dev.name(), "BlackShark V3 Pro");
+        assert_eq!(dev.name(), "BlackShark V3 Pro (Wireless)");
         assert_eq!(dev.battery().unwrap(), Some(43));
         assert!(!dev.charging().unwrap());
         assert!(dev.dpi().is_err());
