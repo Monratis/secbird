@@ -197,7 +197,7 @@ Download: {}", r.version, secbird_core::update::CURRENT, r.url),
         for pid in secbird_core::device::unanswered(&api, &devices).into_iter().filter(|p| selects(*p, "", "")) {
             match db.get(pid) {
                 Some(spec) if secbird_core::headset::is_headset(pid) => {
-                    println!("{pid:04X}  {}  (connected but no answer on its HID audio reports; is it on? is Synapse running?)", spec.name)
+                    println!("{pid:04X}  {}  (connected but not answering. Is it switched on? Is Synapse running?)", spec.name)
                 }
                 Some(spec) if spec.lighting == secbird_core::Lighting::Kraken => {
                     println!("{pid:04X}  {}  (connected; its headset protocol isn't supported yet)", spec.name)

@@ -379,4 +379,160 @@ mod tests {
             assert!(encode(name, &values).is_err(), "{name}");
         }
     }
+
+    #[test]
+    fn minus_zero_band_reads_back_as_zero() {
+        // The headset sends sign/magnitude -0 (128) for a flat EQ band.
+        assert_eq!(decode_byte(128, true), 0);
+        assert_eq!(decode_byte(0, true), 0);
+        assert_eq!(decode_byte(5, true), 5);
+        assert_eq!(decode_byte(133, true), -5);
+        assert_eq!(decode_byte(128, false), 128);
+    }
+
+    /// Counts output reports, proving the second read came from memory, not the headset.
+    struct Counting<T> {
+        inner: T,
+        sends: std::sync::Arc<std::sync::Mutex<usize>>,
+    }
+
+    impl<T: Transport> Transport for Counting<T> {
+        fn send_feature_report(&self, data: &[u8]) -> Result<()> {
+            self.inner.send_feature_report(data)
+        }
+        fn get_feature_report(&self, data: &mut [u8]) -> Result<usize> {
+            self.inner.get_feature_report(data)
+        }
+        fn send_output_report(&self, data: &[u8]) -> Result<()> {
+            *self.sends.lock().unwrap() += 1;
+            self.inner.send_output_report(data)
+        }
+        fn read_timeout(&self, buf: &mut [u8], timeout_ms: i32) -> Result<usize> {
+            self.inner.read_timeout(buf, timeout_ms)
+        }
+    }
+
+    #[test]
+    fn audio_cached_reads_the_headset_once() {
+        let db = crate::Db::builtin().unwrap();
+        let sends = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let sim = Counting { inner: AudioSim(Mutex::new(Vec::new())), sends: sends.clone() };
+        let dev = crate::Device::open(
+            Box::new(sim), PID, 5,
+            std::ffi::CString::new("sim:headset").unwrap(), &[], db.get(PID).cloned(),
+        ).unwrap();
+        let first = dev.audio_cached();
+        let after_first = *sends.lock().unwrap();
+        assert!(after_first > 0, "the first read reaches the headset");
+        let second = dev.audio_cached();
+        assert_eq!(*sends.lock().unwrap(), after_first, "the second read is served from memory");
+        assert_eq!(first, second);
+    }
+
+    /// A headset that remembers what was written: GETs answer with the last SET
+    /// values, factory answers before that. Every SET command is recorded.
+    struct StatefulSim {
+        queue: Mutex<Vec<Vec<u8>>>,
+        stored: std::sync::Arc<Mutex<BTreeMap<u8, Vec<u8>>>>,
+        sent: std::sync::Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl StatefulSim {
+        /// A setting's GET answer: what was written, else what the headset ships with.
+        fn answer(&self, command: u8, args: &[u8]) -> Vec<u8> {
+            let stored = self.stored.lock().unwrap();
+            if command == 0x60 {
+                let mut order = vec![args[0], 0, 1, 0, 0, 0];
+                if args[0] == 0 {
+                    order[3] = 1; // slot 0 is the active one
+                }
+                return order;
+            }
+            if command == 0x15 {
+                if let Some(set) = stored.get(&0x15).filter(|set| set[0] == args[0]) {
+                    return set[1..].to_vec();
+                }
+                return vec![0; 10];
+            }
+            if let Some(set) = stored.get(&command) {
+                return set.clone();
+            }
+            match command {
+                BATTERY => vec![43],
+                CHARGING | 0x13 | 0x16 | 0x19 | 0x55 | 0x2C => vec![0],
+                0x12 => vec![1, 3],
+                0x17 => vec![0; 10],
+                other => panic!("unexpected headset GET {other:02X}"),
+            }
+        }
+    }
+
+    impl Transport for StatefulSim {
+        fn send_feature_report(&self, _: &[u8]) -> Result<()> {
+            Err(Error::Unsupported("no feature reports".into()))
+        }
+        fn get_feature_report(&self, _: &mut [u8]) -> Result<usize> {
+            Err(Error::Unsupported("no feature reports".into()))
+        }
+        fn send_output_report(&self, data: &[u8]) -> Result<()> {
+            let command = data[10];
+            let args = data[13..13 + data[12] as usize].to_vec();
+            assert_eq!(data, request(command, &args));
+            let payload = match command {
+                // A SET is remembered under its GET, and only the read-back proves it.
+                0x92 | 0x93 | 0x95 | 0x96 | 0x97 | 0x99 | 0xAC => {
+                    self.sent.lock().unwrap().push(command);
+                    self.stored.lock().unwrap().insert(command - 0x80, args);
+                    Vec::new()
+                }
+                0xE0 | 0xE1 => {
+                    self.sent.lock().unwrap().push(command);
+                    Vec::new()
+                }
+                _ => self.answer(command, &args),
+            };
+            let mut reply = data.to_vec();
+            reply[1] = 2; // success
+            reply[6] = 4 + payload.len() as u8;
+            reply[11] = 1;
+            reply[12] = payload.len() as u8;
+            reply[13..13 + payload.len()].copy_from_slice(&payload);
+            reply[62] = reply[..62].iter().fold(0, |crc, b| crc ^ b);
+            *self.queue.lock().unwrap() = vec![reply];
+            Ok(())
+        }
+        fn read_timeout(&self, buf: &mut [u8], timeout_ms: i32) -> Result<usize> {
+            assert!((1..=500).contains(&timeout_ms));
+            let reply = self.queue.lock().unwrap().pop().unwrap_or_default();
+            buf[..reply.len()].copy_from_slice(&reply);
+            Ok(reply.len())
+        }
+    }
+
+    #[test]
+    fn profile_apply_writes_only_what_differs() {
+        let db = crate::Db::builtin().unwrap();
+        let stored = std::sync::Arc::new(Mutex::new(BTreeMap::from([(0x19u8, vec![42u8])])));
+        let sent = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let dev = crate::Device::open(
+            Box::new(StatefulSim {
+                queue: Mutex::new(Vec::new()),
+                stored: stored.clone(),
+                sent: sent.clone(),
+            }),
+            PID, 5,
+            std::ffi::CString::new("sim:headset").unwrap(), &[], db.get(PID).cloned(),
+        ).unwrap();
+        let profile = crate::profile::Profile {
+            audio: BTreeMap::from([
+                ("sidetone".to_string(), vec![42]), // already there: no write
+                ("anc".to_string(), vec![80, 3]), // differs: one write
+            ]),
+            ..Default::default()
+        };
+        let out = profile.apply(&dev);
+        assert!(out.iter().all(|a| a.result.is_ok()), "{out:?}");
+        assert_eq!(*sent.lock().unwrap(), vec![0x92], "only the differing setting is sent");
+        assert_eq!(dev.audio_read("anc").unwrap(), vec![80, 3]);
+    }
 }

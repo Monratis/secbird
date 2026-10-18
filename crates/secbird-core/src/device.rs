@@ -33,7 +33,7 @@ pub struct Device {
     /// Headset settings read once, then served from memory until a write or rescan.
     /// The tray editor reloads device state on every focus and after every change;
     /// without this each reload costs ~20 HID round trips.
-    audio_cache: RefCell<Option<(crate::headset::Settings, BTreeMap<String, String>)>>,
+    pub(crate) audio_cache: RefCell<Option<(crate::headset::Settings, BTreeMap<String, String>)>>,
 }
 
 impl Device {
