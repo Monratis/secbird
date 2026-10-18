@@ -338,8 +338,14 @@ impl Profile {
             push(format!("{key} -> {action}"), result);
         }
         // Headset settings, presets before bands: switching a preset resets that EQ's bands.
+        // Each setting is read once and only what differs is written back, so a profile
+        // or program switch doesn't wear the headset's memory with identical values.
+        let (current, _) = dev.audio_state();
         for (name, values) in self.audio.iter().filter(|(n, _)| n.ends_with("preset"))
             .chain(self.audio.iter().filter(|(n, _)| !n.ends_with("preset"))) {
+            if current.get(name) == Some(values) {
+                continue;
+            }
             push(format!("audio {name}"), dev.audio_set(name, values));
         }
         out

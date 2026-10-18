@@ -309,8 +309,8 @@ Note: Razer Synapse is running ({}). It can overwrite these settings;", synapse.
                     .iter()
                     .map(|v| v.parse().map_err(|_| Error::InvalidArg(format!("'{v}' is not a number"))))
                     .collect::<Result<_, _>>()?;
-                actions::set_audio(dev, &mut store, name, values)?;
-                println!("{name} set and read back from the headset");
+                let confirmed = actions::set_audio(dev, &mut store, name, values)?;
+                println!("Set {name}; the headset now reports {}", confirmed.iter().map(i16::to_string).collect::<Vec<_>>().join(" "));
                 Ok(())
             }
         },
@@ -649,7 +649,7 @@ fn button_cmd(dev: &Device, store: &mut Store, rest: &[String]) -> Result<(), Er
 
 fn report_apply(results: Vec<secbird_core::profile::Applied>) -> Result<(), Error> {
     if results.is_empty() {
-        println!("Nothing to apply: the profile has no recorded settings yet.");
+        println!("Nothing to send: the profile is empty or the device already matches it.");
     }
     let mut failed = 0;
     for r in &results {

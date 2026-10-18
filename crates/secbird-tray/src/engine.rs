@@ -184,7 +184,7 @@ impl Engine {
             .into_iter()
             .map(|pid| match db.get(pid) {
                 Some(spec) if secbird_core::headset::is_headset(pid) => {
-                    Unsupported { pid, name: spec.name.clone(), reason: "No answer on its HID audio reports. Check it is on, and close Synapse" }
+                    Unsupported { pid, name: spec.name.clone(), reason: "Not answering. Is it switched on? Is Synapse running?" }
                 }
                 Some(spec) if spec.lighting == secbird_core::Lighting::Kraken => {
                     Unsupported { pid, name: spec.name.clone(), reason: "Headset protocol not supported yet" }

@@ -6,6 +6,8 @@ use crate::error::{Error, Result};
 use crate::proto::{Command, Report, Status, REPORT_LEN};
 use crate::transport::Transport;
 use hidapi::HidApi;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::thread::sleep;
 
@@ -28,6 +30,10 @@ pub struct Device {
     pub path: CString,
     pub txid: u8,
     pub spec: Option<DeviceSpec>,
+    /// Headset settings read once, then served from memory until a write or rescan.
+    /// The tray editor reloads device state on every focus and after every change;
+    /// without this each reload costs ~20 HID round trips.
+    audio_cache: RefCell<Option<(crate::headset::Settings, BTreeMap<String, String>)>>,
 }
 
 impl Device {
@@ -278,7 +284,7 @@ impl Device {
         if crate::headset::is_headset(pid) {
             // Headsets have no Protocol 2.5 serial; a battery read proves it answers, and
             // gives the device its key along the way.
-            let dev = Device { transport, pid, serial: String::new(), interface, path, txid: 0x60, spec };
+            let dev = Device { transport, pid, serial: String::new(), interface, path, txid: 0x60, spec, audio_cache: RefCell::new(None) };
             dev.headset_query(crate::headset::BATTERY).ok()?;
             return Some(dev);
         }
@@ -286,7 +292,7 @@ impl Device {
             transact(transport.as_ref(), t, cmd::SERIAL.get(), cmd::SERIAL_SIZE, &[], READ_RETRIES).ok().map(|r| (t, r))
         })?;
         let serial = parse_serial(reply.args());
-        Some(Device { transport, pid, serial, interface, path, txid, spec })
+        Some(Device { transport, pid, serial, interface, path, txid, spec, audio_cache: RefCell::new(None) })
     }
 }
 

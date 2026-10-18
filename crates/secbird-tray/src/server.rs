@@ -642,7 +642,9 @@ fn sleep_json(dev: &Device) -> Value {
 }
 
 fn device_json(dev: &Device) -> Value {
-    let (audio, audio_errors) = dev.audio_state();
+    // Headset settings are read once and then served from memory; anything else here
+    // already costs a single round trip at most.
+    let (audio, audio_errors) = dev.audio_cached();
     let spec = dev.spec.as_ref();
     let (profile_names, active) = Engine::profiles(dev);
     let all = Store::load(&config_dir().join("profiles.json")).ok().map(|mut s| s.for_device(dev).clone());

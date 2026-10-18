@@ -83,7 +83,7 @@ fn reply(packet: &[u8], command: u8) -> Result<Option<Vec<u8>>> {
 pub(crate) fn query(transport: &dyn Transport, command: u8) -> Result<u8> {
     let data = transact(transport, command, &[])?;
     if data.len() != 1 || (command == BATTERY && data[0] > 100) || (command == CHARGING && data[0] > 1) {
-        return Err(Error::Unsupported("invalid headset status value".into()));
+        return Err(Error::Unsupported("the headset's answer didn't make sense; try again".into()));
     }
     Ok(data[0])
 }
@@ -124,14 +124,14 @@ fn command(name: &str) -> Result<(u8, u8, Vec<u8>, usize)> {
         "auto-off" => (0x2C, 0xAC, vec![], 1),
         "eq-0" | "eq-1" | "eq-2" | "eq-3" | "eq-4" | "eq-5" =>
             (0x15, 0x95, vec![name.as_bytes()[3] - b'0'], 11),
-        _ => return Err(Error::InvalidArg(format!("unknown headset setting '{name}'"))),
+        _ => return Err(Error::InvalidArg(format!("no headset setting is called '{name}'"))),
     };
     Ok((get, set, args, len))
 }
 
 fn encode(name: &str, values: &[i16]) -> Result<(u8, Vec<u8>)> {
     if name == "mic-mute" {
-        return Err(Error::Unsupported("headset mute is a physical switch; software mute belongs to Windows audio settings".into()));
+        return Err(Error::Unsupported("the mute switch is on the headset itself; flip it there, or mute in Windows sound settings".into()));
     }
     let (_, set, mut args, len) = command(name)?;
     let eq = name == "mic-eq" || name.starts_with("eq-") && name != "eq-preset";
@@ -149,10 +149,16 @@ fn encode(name: &str, values: &[i16]) -> Result<(u8, Vec<u8>)> {
         }
     };
     if !valid || args.len() + values.len() != len {
-        return Err(Error::InvalidArg(format!("invalid values for headset {name}")));
+        return Err(Error::InvalidArg(format!("'{name}' can't use those values ({values:?})")));
     }
     args.extend(values.iter().map(|n| if *n < 0 { 128 | (-*n as u8) } else { *n as u8 }));
     Ok((set, args))
+}
+
+/// A raw EQ byte back to dB. The headset speaks sign/magnitude, and sends -0 (128)
+/// for a flat band, so 128 means 0, not 128.
+fn decode_byte(raw: u8, eq: bool) -> i16 {
+    if eq && raw >= 128 { 128 - raw as i16 } else { raw as i16 }
 }
 
 impl Device {
@@ -168,18 +174,16 @@ impl Device {
                 }
                 if order[2] == 1 && order[3] == 1 { active.push(slot as i16); }
             }
-            if active.len() != 1 { return Err(Error::Unsupported("ambiguous active speaker EQ slot".into())); }
+            if active.len() != 1 { return Err(Error::Unsupported("couldn't tell which speaker EQ slot the headset is using".into())); }
             return Ok(active);
         }
         let (get, _, args, len) = command(name)?;
         let data = self.headset_transact(get, &args)?;
         if data.len() != len || (!args.is_empty() && data[0] != args[0]) {
-            return Err(Error::Unsupported(format!("invalid headset {name} reply")));
+            return Err(Error::Unsupported(format!("the headset's answer for '{name}' didn't make sense")));
         }
         let eq = name == "mic-eq" || !args.is_empty();
-        Ok(data[args.len()..].iter().map(|n| {
-            if eq && *n > 128 { 128 - *n as i16 } else { *n as i16 }
-        }).collect())
+        Ok(data[args.len()..].iter().map(|n| decode_byte(*n, eq)).collect())
     }
 
     pub fn audio_set(&self, name: &str, values: &[i16]) -> Result<()> {
@@ -189,10 +193,10 @@ impl Device {
             for slot in 0..6 {
                 let mut order = self.headset_transact(0x60, &[slot])?;
                 if order.len() != 6 || order[0] != slot {
-                    return Err(Error::Unsupported("invalid speaker EQ slot metadata".into()));
+                    return Err(Error::Unsupported("the headset sent speaker-EQ details this app doesn't understand".into()));
                 }
                 if slot == args[0] && order[2] != 1 {
-                    return Err(Error::Unsupported("this speaker EQ slot is disabled in firmware".into()));
+                    return Err(Error::Unsupported("the headset has this EQ slot switched off, so it can't be used".into()));
                 }
                 order[3] = u8::from(slot == args[0]);
                 orders.push(order);
@@ -208,7 +212,7 @@ impl Device {
             // This follows Synapse's setCloudBasedEqualizer_Stereo sequence.
             let order = self.headset_transact(0x60, &args[..1])?;
             if order.len() != 6 || order[0] != args[0] {
-                return Err(Error::Unsupported("invalid speaker EQ slot metadata".into()));
+                return Err(Error::Unsupported("the headset sent speaker-EQ details this app doesn't understand".into()));
             }
             self.headset_transact(0xE1, &[1])?;
             let write = self.headset_transact(set, &args)
@@ -221,12 +225,15 @@ impl Device {
         }
         let actual = self.audio_read(name)?;
         if actual != values {
-            return Err(Error::Unsupported(format!("headset {name} read-back {actual:?} differs from {values:?}; close Synapse and retry")));
+            return Err(Error::Unsupported(format!("the headset didn't keep the new '{name}': it still reports {actual:?}; close Synapse and try again")));
         }
+        self.audio_cache.borrow_mut().take();
         Ok(())
     }
 
     /// Individual read failures are surfaced, not replaced with guessed defaults.
+    /// [`Self::audio_cached`] serves this from memory after the first read; the tray
+    /// editor uses that, while reports and profile switches read fresh.
     pub fn audio_state(&self) -> (Settings, BTreeMap<String, String>) {
         let mut settings = Settings::new();
         let mut errors = BTreeMap::new();
@@ -240,6 +247,17 @@ impl Device {
             }
         }
         (settings, errors)
+    }
+
+    /// [`Self::audio_state`], read from the headset once and then served from memory.
+    /// A successful [`Self::audio_set`] clears it, so the next read sees the change.
+    pub fn audio_cached(&self) -> (Settings, BTreeMap<String, String>) {
+        if let Some(cached) = self.audio_cache.borrow().clone() {
+            return cached;
+        }
+        let fresh = self.audio_state();
+        *self.audio_cache.borrow_mut() = Some(fresh.clone());
+        fresh
     }
 }
 

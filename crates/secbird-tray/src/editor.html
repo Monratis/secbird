@@ -1160,6 +1160,9 @@ function buildEditor(host, r) {
 const AUDIO_BANDS = ['31', '63', '125', '250', '500', '1k', '2k', '4k', '8k', '16k'];
 const MIC_PRESETS = [[32, 'Default'], [33, 'Flat'], [34, 'Broadcast'], [35, 'Esports']];
 const AUDIO_SLOTS = ['Default', 'Game', 'Music', 'Movie', 'Esports 1', 'Esports 2'];
+const AUDIO_LABELS = { anc: 'Noise cancelling', 'eq-preset': 'Active EQ slot', 'mic-preset': 'Microphone preset',
+  'mic-eq': 'Microphone EQ', sidetone: 'Sidetone', 'auto-off': 'Automatic power-off', 'mic-mute': 'Microphone mute' };
+const audioLabel = name => name !== 'eq-preset' && name.startsWith('eq-') ? 'Speaker EQ' : (AUDIO_LABELS[name] || name);
 const audioValue = name => dev.audio && dev.audio[name];
 const audioError = name => dev.audio_errors && dev.audio_errors[name];
 function audioEditor(host) {
@@ -1172,8 +1175,7 @@ function audioEditor(host) {
       const r = await api('/api/audio', { name, values });
       Object.assign(dev, r.device);
       renderWork();
-      const got = (r.device.audio && r.device.audio[name]) || [];
-      toast(name + ' read back as [' + got.join(', ') + ']');
+      toast(audioLabel(name) + ' saved.');
     } catch (e) { toast(e.message, true); }
     finally { if (button) button.disabled = false; }
   };
@@ -1221,7 +1223,7 @@ function audioEditor(host) {
   };
 
   const speakerSlot = audio['eq-preset'] && audio['eq-preset'][0] || 0;
-  const speaker = card('Speaker equalizer', 'Choose a slot to edit; slot 0 is the headset default. Activate saves the selected slot as the active headset EQ.');
+  const speaker = card('Speaker equalizer', "Pick a slot to edit. Slot 0 is the headset's own sound; Activate makes the picked slot the one the headset plays.");
   if (audioError('eq-preset')) speaker.append(el('p', { className: 'audio-error', textContent: 'Active EQ slot: ' + errors['eq-preset'] }));
   const slots = el('div', { className: 'audio-tiles', role: 'group', ariaLabel: 'Speaker EQ slot to edit' });
   let editSlot = Math.min(5, Math.max(0, audioEditSlot));
@@ -1244,7 +1246,7 @@ function audioEditor(host) {
     presets.append(tiles); box.append(presets);
   } else if (errors['mic-preset']) box.append(el('p', { className: 'audio-error', textContent: 'Microphone EQ preset: ' + errors['mic-preset'] }));
 
-  const controls = card('Headset controls', 'Settings are sent to the headset and displayed from its read-back values.');
+  const controls = card('Headset controls', 'What you see is what the headset itself reports.');
   const setting = (name, label, control, valueText) => {
     if (audioValue(name)) controls.append(el('div', { className: 'edgroup' }, el('h3', { textContent: label }), control,
       valueText ? el('span', { className: 'val num', textContent: valueText }) : null));
@@ -1275,7 +1277,7 @@ function audioEditor(host) {
     el('p', { className: 'note', textContent: 'The physical mute switch cannot be changed in software.' })));
   else setting('mic-mute', 'Microphone mute · read-only', null);
   if (Object.keys(errors).length) {
-    const failed = card('Settings that could not be read', 'These errors are reported by the headset and may mean a setting is unavailable.');
+    const failed = card("Some settings couldn't be read", "The headset didn't answer these. They may not exist on this model.");
     Object.entries(errors).forEach(([name, message]) => failed.append(el('p', { className: 'audio-error' }, el('b', { textContent: name + ': ' }), message)));
     box.append(failed);
   }
